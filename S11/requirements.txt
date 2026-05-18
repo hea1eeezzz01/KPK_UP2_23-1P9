@@ -1,12 +1,4 @@
-# Core framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-
-# Database ORM
-peewee==3.17.1
-
-# Data validation
-pydantic==2.5.0
-
-# Для работы с SQLite (обычно уже встроен, но для совместимости)
-# sqlite3 - встроенный модуль Python, не требует установки
+fastapi
+uvicorn[standard]
+peewee
+pydantic
