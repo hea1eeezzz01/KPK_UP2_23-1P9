@@ -1,5 +1,5 @@
-from peewee import SqliteDatabase, Model, CharField, IntegerField, ForeignKeyField, BooleanField, AutoField
-from pydantic import BaseModel, Field, validator
+from peewee import SqliteDatabase, Model, CharField, IntegerField, ForeignKeyField, AutoField
+from pydantic import BaseModel, Field, validator, root_validator
 from typing import Optional, List
 
 db = SqliteDatabase('disciplines.db')
@@ -11,25 +11,24 @@ class Category(Model):
     class Meta:
         database = db
 
-# Таблица дисциплин с мягким удалением (техническая реализация)
+# Таблица дисциплин (без мягкого удаления - физическое удаление)
 class Discipline(Model):
     id = AutoField()
     name = CharField(unique=True, max_length=100)
     code = CharField(unique=True, max_length=20)
     total_hours = IntegerField()
     category = ForeignKeyField(Category, backref='disciplines', null=False)
-    is_deleted = BooleanField(default=False)  # Техническое поле для soft delete
 
     class Meta:
         database = db
 
-# --- Pydantic схемы для ответов (строго по документации) ---
+# --- Pydantic схемы для ответов ---
 class DisciplineResponse(BaseModel):
     id: int
     name: str
     code: str
     total_hours: int
-    category_id: int  # Возвращаем ID категории, как указано в документации
+    category_id: int
     
     class Config:
         from_attributes = True
@@ -41,32 +40,25 @@ class CategoryResponse(BaseModel):
     class Config:
         from_attributes = True
 
-# --- Pydantic схемы для запросов (строго по документации) ---
+# --- Pydantic схемы для запросов ---
 class CategoryCreate(BaseModel):
     name: str = Field(..., max_length=100)
 
 class DisciplineCreate(BaseModel):
     name: str = Field(..., max_length=100)
     code: str = Field(..., max_length=20)
-    total_hours: int = Field(..., gt=0)
+    total_hours: int = Field(..., gt=0)  # строго больше 0
     category_id: int
 
     @validator('name')
     def name_unique(cls, v):
-        # Проверка уникальности только среди активных (не удаленных) дисциплин
-        if Discipline.select().where(
-            Discipline.name == v, 
-            Discipline.is_deleted == False
-        ).exists():
+        if Discipline.select().where(Discipline.name == v).exists():
             raise ValueError('Discipline with this name already exists')
         return v
 
     @validator('code')
     def code_unique(cls, v):
-        if Discipline.select().where(
-            Discipline.code == v, 
-            Discipline.is_deleted == False
-        ).exists():
+        if Discipline.select().where(Discipline.code == v).exists():
             raise ValueError('Discipline with this code already exists')
         return v
 
@@ -79,25 +71,30 @@ class DisciplineCreate(BaseModel):
 class DisciplineUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=100)
     code: Optional[str] = Field(None, max_length=20)
-    total_hours: Optional[int] = Field(None, gt=0)
+    total_hours: Optional[int] = Field(None, gt=0)  # gt=0 для обновления
     category_id: Optional[int] = None
     
-    # НЕ используем extra='allow' - строгое соответствие документации
+    @root_validator
+    def at_least_one_field(cls, values):
+        """Проверка, что передан хотя бы один параметр для обновления"""
+        if not any([values.get('name'), values.get('code'), 
+                   values.get('total_hours'), values.get('category_id')]):
+            raise ValueError('At least one field must be provided for update')
+        return values
     
     @validator('name')
     def name_unique(cls, v, values):
         if v:
-            # Для валидации уникальности при обновлении нужен id дисциплины
-            # Он будет передан отдельно в функцию обновления, не через схему
-            # Здесь мы не можем проверить уникальность, т.к. нет id
-            # Проверка будет в API слое
+            # Проверка уникальности для обновления
+            # ID будет передан отдельно, здесь проверяем без ID
+            # Полная проверка будет в API слое с учетом ID
             pass
         return v
 
     @validator('code')
     def code_unique(cls, v, values):
         if v:
-            # Аналогично - проверка в API слое
+            # Аналогично - полная проверка в API слое
             pass
         return v
 
@@ -106,23 +103,14 @@ class DisciplineUpdate(BaseModel):
         if v is not None and not Category.select().where(Category.id == v).exists():
             raise ValueError(f'Category with id {v} does not exist')
         return v
-    
-    def has_fields(self) -> bool:
-        """Проверка, что передан хотя бы один параметр для обновления"""
-        return any([
-            self.name is not None,
-            self.code is not None,
-            self.total_hours is not None,
-            self.category_id is not None
-        ])
 
 class DisciplineFilter(BaseModel):
     category_id: Optional[int] = None
     name_contains: Optional[str] = None
     code_contains: Optional[str] = None
-    min_hours: Optional[int] = Field(None, ge=0)
-    max_hours: Optional[int] = Field(None, ge=0)
-    limit: int = Field(100, ge=1)  # Без верхнего ограничения, но с проверкой на положительность
+    min_hours: Optional[int] = Field(None, gt=0)  # gt=0, а не ge=0
+    max_hours: Optional[int] = Field(None, gt=0)  # gt=0, так как часы >0
+    limit: int = Field(100, ge=1, le=100)  # максимальное значение = 100 согласно документации
     offset: int = Field(0, ge=0)
     
     @validator('category_id')
@@ -131,16 +119,20 @@ class DisciplineFilter(BaseModel):
             raise ValueError(f'Category with id {v} does not exist')
         return v
     
+    @validator('max_hours')
+    def max_hours_greater_than_min(cls, v, values):
+        """Проверка, что max_hours >= min_hours"""
+        if v is not None and values.get('min_hours') is not None:
+            if v < values['min_hours']:
+                raise ValueError('max_hours must be greater than or equal to min_hours')
+        return v
+    
     def apply_filters(self, query):
-        """Применение фильтров к запросу (только активные записи)"""
-        # По умолчанию и всегда исключаем удаленные записи
-        query = query.where(Discipline.is_deleted == False)
-        
+        """Применение фильтров к запросу"""
         if self.category_id:
             query = query.where(Discipline.category == self.category_id)
         
         if self.name_contains:
-            # Регистронезависимый поиск
             query = query.where(Discipline.name.contains(self.name_contains))
         
         if self.code_contains:
