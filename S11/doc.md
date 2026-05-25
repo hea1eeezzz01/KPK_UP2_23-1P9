@@ -127,4 +127,5 @@ erDiagram
         string code UK
         int total_hours
         int category_id FK
+        boolean is_deleted
     }
