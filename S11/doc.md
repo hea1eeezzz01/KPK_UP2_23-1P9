@@ -112,15 +112,8 @@
 
 ## 6. ER-диаграмма
 
-```mermaid
-erDiagram
-    CATEGORY ||--|{ DISCIPLINE : "содержит"
-    
-    CATEGORY {
-        int id PK
-        string name
-    }
-    
+<img width="429" height="241" alt="image" src="https://github.com/user-attachments/assets/8154c650-76a3-4b6f-b1d3-fd9f7be486d1" />
+
     DISCIPLINE {
         int id PK
         string name UK
